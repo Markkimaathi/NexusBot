@@ -1,89 +1,109 @@
 import os
 import streamlit as st
 import pickle
-import time
 from langchain.llms import OpenAI
 from langchain.chains import RetrievalQAWithSourcesChain
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain.document_loaders import UnstructuredURLLoader
 from langchain.embeddings import OpenAIEmbeddings
 from langchain.vectorstores import FAISS
-
+from PyPDF2 import PdfReader
 from dotenv import load_dotenv
+
 load_dotenv()
 
-st.title("NexusBot: News Research Tool 📈")
-st.sidebar.title("News Article URLs")
+st.set_page_config(page_title="NexusBot: Research Tool 📈", page_icon="🤖")
+st.title("NexusBot: Chat with URLs and PDFs 📄🔗")
+st.sidebar.title("Input Options")
 
-# Collect up to 3 URLs from the user
+# OpenAI API Key setup
+openai_api_key = os.getenv("OPENAI_API_KEY")
+llm = OpenAI(temperature=0.7, max_tokens=500)
+
+# URLs Input
+st.sidebar.subheader("Enter 3 URLs")
 urls = []
 for i in range(3):
-    url = st.sidebar.text_input(f"URL {i+1}")
-    if url.strip():  # Check if the URL is not empty
+    url = st.sidebar.text_input(f"URL {i + 1}")
+    if url.strip():
         urls.append(url)
 
-process_url_clicked = st.sidebar.button("Process URLs")
+# PDFs Input
+st.sidebar.subheader("Upload PDF files")
+pdf_docs = st.sidebar.file_uploader("Upload your PDFs", accept_multiple_files=True)
+
+# Buttons
+process_inputs_clicked = st.sidebar.button("Process Inputs")
+
+# File path to save FAISS index
 file_path = "faiss_store_openai.pkl"
 
-main_placeholder = st.empty()
-llm = OpenAI(temperature=0.9, max_tokens=500)
+# Function to extract text from PDFs
+def get_pdf_text(pdf_docs):
+    text = ""
+    for pdf in pdf_docs:
+        pdf_reader = PdfReader(pdf)
+        for page in pdf_reader.pages:
+            text += page.extract_text()
+    return text
 
-if process_url_clicked:
-    if urls:  # Ensure there are valid URLs
-        try:
-            # Load data from the URLs
-            loader = UnstructuredURLLoader(urls=urls)
-            main_placeholder.text("Data Loading... Started... ✅✅✅")
-            data = loader.load()
+# Function to process URLs and PDFs and build vector store
+def process_inputs(urls, pdf_docs):
+    all_text = ""
 
-            # Split the data into manageable chunks
-            text_splitter = RecursiveCharacterTextSplitter(
-                separators=['\n\n', '\n', '.', ','],
-                chunk_size=1000
-            )
-            main_placeholder.text("Text Splitting... Started... ✅✅✅")
-            docs = text_splitter.split_documents(data)
+    # Processing URLs
+    if urls:
+        loader = UnstructuredURLLoader(urls=urls)
+        url_data = loader.load()
+        url_text = " ".join([doc.page_content for doc in url_data])
+        all_text += url_text
 
-            # Create embeddings and save them to a FAISS index
-            embeddings = OpenAIEmbeddings()
-            vectorstore_openai = FAISS.from_documents(docs, embeddings)
-            main_placeholder.text("Embedding Vectors... Started Building... ✅✅✅")
-            time.sleep(2)
+    # Processing PDFs
+    if pdf_docs:
+        pdf_text = get_pdf_text(pdf_docs)
+        all_text += pdf_text
 
-            # Save the FAISS index to a pickle file
-            with open(file_path, "wb") as f:
-                pickle.dump(vectorstore_openai, f)
+    if all_text:
+        text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=100)
+        docs = text_splitter.split_text(all_text)
 
-            main_placeholder.success("Processing complete. You can now ask questions.")
-        except Exception as e:
-            st.error(f"An error occurred during processing: {e}")
+        embeddings = OpenAIEmbeddings()
+        vector_store = FAISS.from_texts(docs, embeddings)
+
+        # Save vector store
+        with open(file_path, "wb") as f:
+            pickle.dump(vector_store, f)
+        st.success("Processing complete! You can now ask questions.")
     else:
-        st.warning("Please enter at least one valid URL.")
+        st.warning("Please enter at least one URL or upload a PDF.")
 
-# Allow the user to input a query
-query = main_placeholder.text_input("Question: ")
+# Process inputs when button is clicked
+if process_inputs_clicked:
+    process_inputs(urls, pdf_docs)
+
+# Query the processed data
+query = st.text_input("Ask a question about the processed data:")
+
 if query:
     if os.path.exists(file_path):
-        try:
-            # Load the FAISS index from the pickle file
-            with open(file_path, "rb") as f:
-                vectorstore = pickle.load(f)
-                chain = RetrievalQAWithSourcesChain.from_llm(llm=llm, retriever=vectorstore.as_retriever())
-                result = chain({"question": query}, return_only_outputs=True)
+        with open(file_path, "rb") as f:
+            vectorstore = pickle.load(f)
+        retriever = vectorstore.as_retriever()
+        chain = RetrievalQAWithSourcesChain.from_llm(llm=llm, retriever=retriever)
 
-                # Display the answer and sources
-                st.header("Answer")
-                st.write(result.get("answer", "No answer found."))
+        # Run the query and display results
+        result = chain({"question": query}, return_only_outputs=True)
 
-                sources = result.get("sources", "")
-                if sources:
-                    st.subheader("Sources:")
-                    sources_list = sources.split("\n")  # Split sources by newline
-                    for source in sources_list:
-                        st.write(source)
-                else:
-                    st.write("No sources available.")
-        except Exception as e:
-            st.error(f"An error occurred while retrieving the answer: {e}")
+        st.subheader("Answer")
+        st.write(result.get("answer", "No answer found."))
+
+        sources = result.get("sources", "")
+        if sources:
+            st.subheader("Sources:")
+            sources_list = sources.split("\n")
+            for source in sources_list:
+                st.write(source)
+        else:
+            st.write("No sources available.")
     else:
-        st.warning("The FAISS index does not exist. Please process the URLs first.")
+        st.warning("Please process the URLs and PDFs first.")
